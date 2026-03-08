@@ -1,8 +1,23 @@
+import logging
 import os
 import sqlite3
 import re
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Local cache directory for Apple Podcasts TTML transcripts
+TTML_CACHE_DIR = (
+    Path.home()
+    / "Library"
+    / "Group Containers"
+    / "243LU875E5.groups.com.apple.podcasts"
+    / "Library"
+    / "Cache"
+    / "Assets"
+    / "TTML"
+)
 
 def find_apple_podcast_db() -> Optional[str]:
     """Find the Apple Podcasts SQLite database in the Group Containers directory."""
@@ -205,8 +220,179 @@ def get_podcast_app_url(audio_url: str, guid: str = None, title: str = None) -> 
     except sqlite3.Error as e:
         print(f"Error querying Apple Podcasts database: {e}")
         return "https://podcasts.apple.com"
-    
+
     finally:
         if 'conn' in locals():
             conn.close()
 
+
+def get_episode_transcript_info(guid: str) -> Optional[dict]:
+    """Query Apple Podcasts DB for transcript info by episode GUID.
+
+    Returns {"transcript_id": str, "store_track_id": int, "provider": str}
+    if a transcript identifier exists, else None.
+    """
+    try:
+        db_path = find_apple_podcast_db()
+        if not db_path:
+            return None
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT ZTRANSCRIPTIDENTIFIER, ZSTORETRACKID, ZFREETRANSCRIPTPROVIDER
+                FROM ZMTEPISODE
+                WHERE ZGUID = ? AND ZTRANSCRIPTIDENTIFIER IS NOT NULL
+                """,
+                (guid,),
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return {
+                "transcript_id": row[0],
+                "store_track_id": int(row[1]) if row[1] else None,
+                "provider": row[2] or "apple",
+            }
+        finally:
+            conn.close()
+
+    except Exception as e:
+        logger.warning("Error getting transcript info for GUID %s: %s", guid, e)
+        return None
+
+
+def get_cached_ttml(transcript_id: str, store_track_id: int) -> Optional[str]:
+    """Check local TTML cache for a transcript file and return its contents.
+
+    The file is expected at:
+    {TTML_CACHE_DIR}/{transcript_id}-{store_track_id}.ttml
+
+    Returns the file contents as a string, or None if not found.
+    """
+    try:
+        filename = f"{transcript_id}-{store_track_id}.ttml"
+        filepath = TTML_CACHE_DIR / filename
+        if filepath.is_file():
+            return filepath.read_text(encoding="utf-8")
+        return None
+    except Exception as e:
+        logger.warning("Error reading cached TTML %s-%s: %s", transcript_id, store_track_id, e)
+        return None
+
+
+def find_episode_in_apple_db(
+    guid: str = None, title: str = None, audio_url: str = None
+) -> Optional[dict]:
+    """Flexible lookup in ZMTEPISODE returning transcript-relevant data.
+
+    Tries GUID first, then title fuzzy match, then audio URL match.
+
+    Returns {"z_pk": int, "title": str, "guid": str,
+             "transcript_id": str, "store_track_id": int} or None.
+    """
+    try:
+        db_path = find_apple_podcast_db()
+        if not db_path:
+            return None
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        try:
+            select_cols = (
+                "Z_PK, ZTITLE, ZGUID, ZTRANSCRIPTIDENTIFIER, ZSTORETRACKID"
+            )
+
+            # 1. Try GUID
+            if guid:
+                cursor.execute(
+                    f"SELECT {select_cols} FROM ZMTEPISODE WHERE ZGUID = ?",
+                    (guid,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return _row_to_episode_dict(row)
+
+            # 2. Try title fuzzy match
+            if title:
+                clean_title = re.sub(
+                    r"^(BONUS|EPISODE|PREVIEW|TRAILER|TEASER):\s*",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+                clean_title = re.sub(r"[^\w\s]", "", clean_title).strip()
+
+                common_words = {
+                    "the", "and", "for", "with", "that", "this",
+                    "from", "have", "what", "your", "are", "how",
+                }
+                words = [
+                    w for w in clean_title.split()
+                    if len(w) > 3 and w.lower() not in common_words
+                ]
+                significant_words = words[:3]
+
+                if significant_words:
+                    conditions = ["ZTITLE LIKE ?" for _ in significant_words]
+                    params = [f"%{w}%" for w in significant_words]
+
+                    cursor.execute(
+                        f"SELECT {select_cols} FROM ZMTEPISODE WHERE "
+                        + " AND ".join(conditions),
+                        params,
+                    )
+                    rows = cursor.fetchall()
+
+                    if len(rows) == 1:
+                        return _row_to_episode_dict(rows[0])
+                    elif len(rows) > 1:
+                        best = None
+                        best_score = 0
+                        for row in rows:
+                            row_title = (row[1] or "").lower()
+                            score = sum(
+                                1 for w in significant_words if w.lower() in row_title
+                            )
+                            if score > best_score:
+                                best = row
+                                best_score = score
+                        if best and best_score >= len(significant_words) / 2:
+                            return _row_to_episode_dict(best)
+
+            # 3. Try audio URL
+            if audio_url:
+                filename_match = re.search(r"/([^/]+\.mp3)", audio_url)
+                if filename_match:
+                    cursor.execute(
+                        f"SELECT {select_cols} FROM ZMTEPISODE WHERE ZASSETURL LIKE ?",
+                        (f"%{filename_match.group(1)}%",),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        return _row_to_episode_dict(row)
+
+            return None
+        finally:
+            conn.close()
+
+    except Exception as e:
+        logger.warning("Error finding episode in Apple DB: %s", e)
+        return None
+
+
+def _row_to_episode_dict(row: tuple) -> dict:
+    """Convert a ZMTEPISODE row to a transcript info dict."""
+    return {
+        "z_pk": row[0],
+        "title": row[1],
+        "guid": row[2],
+        "transcript_id": row[3],
+        "store_track_id": int(row[4]) if row[4] else None,
+    }
