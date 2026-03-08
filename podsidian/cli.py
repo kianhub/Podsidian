@@ -139,6 +139,49 @@ def show_config():
     value_items = [("enabled", config.value_prompt_enabled), ("prompt", config.value_prompt)]
     print_section("Value Analysis", value_items)
 
+    # Apple Transcripts Settings
+    apple_items = [
+        ("enabled", config.apple_transcripts_enabled),
+        ("prefer_over_rss", config.apple_transcripts_prefer_over_rss),
+        ("include_speaker_labels", config.apple_transcripts_include_speaker_labels),
+    ]
+    print_section("Apple Transcripts", apple_items)
+
+    # Apple Podcasts DB status
+    from .apple_podcasts import find_apple_podcast_db, TTML_CACHE_DIR
+
+    apple_db_path = find_apple_podcast_db()
+    click.echo(
+        f"  Apple Podcasts DB: "
+        f"{click.style('Found', fg='green') if apple_db_path else click.style('Not found', fg='red')}"
+    )
+
+    if apple_db_path:
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(apple_db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM ZMTEPISODE WHERE ZTRANSCRIPTIDENTIFIER IS NOT NULL"
+            )
+            apple_transcript_count = cursor.fetchone()[0]
+            conn.close()
+            click.echo(
+                f"  Episodes with transcript IDs: "
+                f"{click.style(str(apple_transcript_count), fg='blue')}"
+            )
+        except Exception:
+            pass
+
+    if TTML_CACHE_DIR.exists():
+        ttml_files = list(TTML_CACHE_DIR.glob("*.ttml"))
+        click.echo(
+            f"  Locally cached TTML files: {click.style(str(len(ttml_files)), fg='blue')}"
+        )
+    else:
+        click.echo(f"  Locally cached TTML files: {click.style('0', fg='blue')}")
+
     # Database Settings
     db_items = [
         ("path", DEFAULT_DB_PATH),
@@ -399,8 +442,15 @@ def episodes(ratings, filter_tier):
         date_str = episode.published_at.strftime("%Y-%m-%d") if episode.published_at else "No date"
         status = "✓" if episode.transcript else " "
 
+        # Format transcript source indicator
+        source_tag = ""
+        if episode.transcript_source:
+            source_colors = {"apple": "green", "external": "cyan", "whisper": "yellow"}
+            src_color = source_colors.get(episode.transcript_source, "white")
+            source_tag = f" {click.style(f'[{episode.transcript_source}]', fg=src_color)}"
+
         # Format basic episode info
-        episode_line = f"[{status}] {click.style(f'#{episode.id:04d}', fg='bright_blue')} {date_str} - {episode.title}"
+        episode_line = f"[{status}] {click.style(f'#{episode.id:04d}', fg='bright_blue')} {date_str} - {episode.title}{source_tag}"
 
         # Add rating info if requested or available
         if ratings and episode.rating:
@@ -1070,6 +1120,143 @@ def mcp(port, stdio):
     else:
         # Run as HTTP server
         uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+@cli.command(name="apple-transcripts")
+@click.option("--apply", is_flag=True, help="Re-ingest episodes that could switch to Apple transcripts")
+@click.option("--debug", is_flag=True, help="Enable debug output")
+def apple_transcripts(apply, debug):
+    """Show Apple transcript availability and stats.
+
+    Shows how many episodes in the Apple Podcasts database have transcripts,
+    how many Podsidian episodes match, and how many Whisper-transcribed episodes
+    could be switched to Apple transcripts.
+
+    Use --apply to re-ingest those episodes using Apple transcripts.
+    """
+    import sqlite3
+    from .apple_podcasts import find_apple_podcast_db
+    from .models import Episode, Podcast
+
+    session = get_db_session()
+
+    # Check Apple Podcasts DB
+    apple_db_path = find_apple_podcast_db()
+    if not apple_db_path:
+        click.echo(click.style("Apple Podcasts database not found.", fg="red"))
+        return
+
+    click.echo(click.style("\nApple Transcripts Overview", fg="green", bold=True))
+    click.echo("=" * 40)
+
+    # Count total episodes with transcripts in Apple DB
+    try:
+        conn = sqlite3.connect(apple_db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM ZMTEPISODE WHERE ZTRANSCRIPTIDENTIFIER IS NOT NULL"
+        )
+        total_apple_transcripts = cursor.fetchone()[0]
+        click.echo(
+            f"\nApple Podcasts DB episodes with transcripts: "
+            f"{click.style(str(total_apple_transcripts), fg='blue', bold=True)}"
+        )
+    except Exception as e:
+        click.echo(click.style(f"Error reading Apple Podcasts DB: {e}", fg="red"))
+        return
+    finally:
+        conn.close()
+
+    # Match Podsidian episodes to Apple transcript IDs
+    from .apple_podcasts import find_episode_in_apple_db
+
+    podsidian_episodes = session.query(Episode).join(Podcast).all()
+    matched = []
+    whisper_switchable = []
+
+    for ep in podsidian_episodes:
+        apple_info = find_episode_in_apple_db(
+            guid=ep.guid, title=ep.title, audio_url=ep.audio_url
+        )
+        if apple_info and apple_info.get("transcript_id"):
+            matched.append(ep)
+            if ep.transcript_source == "whisper":
+                whisper_switchable.append(ep)
+
+    click.echo(
+        f"Podsidian episodes matched to Apple transcript IDs: "
+        f"{click.style(str(len(matched)), fg='blue', bold=True)}"
+    )
+
+    # Transcript source breakdown
+    source_counts = {}
+    for ep in podsidian_episodes:
+        src = ep.transcript_source or "none"
+        source_counts[src] = source_counts.get(src, 0) + 1
+
+    click.echo(f"\nTranscript source breakdown:")
+    for src, count in sorted(source_counts.items()):
+        click.echo(f"  {src}: {click.style(str(count), fg='blue')}")
+
+    click.echo(
+        f"\nWhisper episodes switchable to Apple: "
+        f"{click.style(str(len(whisper_switchable)), fg='yellow', bold=True)}"
+    )
+
+    if whisper_switchable:
+        click.echo("\nSwitchable episodes:")
+        for ep in whisper_switchable:
+            date_str = ep.published_at.strftime("%Y-%m-%d") if ep.published_at else "No date"
+            click.echo(
+                f"  #{ep.id:04d} {date_str} - {ep.title} "
+                f"({click.style(ep.podcast.title, fg='bright_black')})"
+            )
+
+    if apply:
+        if not whisper_switchable:
+            click.echo("\nNo episodes to switch.")
+            return
+
+        click.echo(
+            f"\nRe-ingesting {len(whisper_switchable)} episode(s) with Apple transcripts..."
+        )
+
+        from .core import PodcastProcessor
+
+        processor = PodcastProcessor(session)
+        success_count = 0
+        failed_count = 0
+
+        for ep in whisper_switchable:
+            try:
+                processor.reingest_episode(
+                    ep.id,
+                    progress_callback=lambda info: (
+                        click.echo(f"  {click.style('ℹ', fg='blue')} {info.get('message', '')}")
+                        if info.get("stage") == "info"
+                        else None
+                    ),
+                    debug=debug,
+                )
+                success_count += 1
+                click.echo(f"  {click.style('✓', fg='green')} #{ep.id:04d} - {ep.title}")
+            except Exception as e:
+                failed_count += 1
+                click.echo(
+                    f"  {click.style('✗', fg='red')} #{ep.id:04d} - {ep.title}: {str(e)}"
+                )
+
+        click.echo(f"\n{click.style('Summary:', bold=True)}")
+        click.echo(f"  {click.style('✓', fg='green')} Switched: {success_count}")
+        if failed_count:
+            click.echo(f"  {click.style('✗', fg='red')} Failed: {failed_count}")
+    else:
+        if whisper_switchable:
+            click.echo(
+                f"\nRun with {click.style('--apply', bold=True)} to re-ingest these episodes."
+            )
+
+    click.echo()
 
 
 @cli.group()
