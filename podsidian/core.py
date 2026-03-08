@@ -907,7 +907,7 @@ CHANGES MADE:
         import logging
 
         try:
-            from .apple_podcasts import find_episode_in_apple_db, get_cached_ttml
+            from .apple_podcasts import find_episode_in_apple_db, download_apple_ttml
             from .ttml_parser import parse_ttml
 
             if progress_callback:
@@ -948,17 +948,17 @@ CHANGES MADE:
                 progress_callback(
                     {
                         "stage": "apple_transcript",
-                        "message": "Checking Apple Podcasts TTML cache...",
+                        "message": "Checking Apple Podcasts TTML cache and CDN...",
                     }
                 )
 
-            ttml_content = get_cached_ttml(transcript_id, store_track_id)
+            ttml_content = download_apple_ttml(transcript_id, store_track_id)
             if not ttml_content:
                 if progress_callback:
                     progress_callback(
                         {
                             "stage": "apple_transcript",
-                            "message": "TTML file not found in local cache",
+                            "message": "TTML not found in local cache or CDN",
                         }
                     )
                 return None
