@@ -898,6 +898,122 @@ CHANGES MADE:
 
         return get_podcast_app_url(audio_url, guid, title)
 
+    def _get_apple_transcript(self, episode, progress_callback=None) -> Optional[str]:
+        """Try to get transcript from Apple Podcasts local TTML cache.
+
+        Returns the transcript text if found, or None if unavailable.
+        Catches all exceptions to ensure Whisper fallback always works.
+        """
+        import logging
+
+        try:
+            from .apple_podcasts import find_episode_in_apple_db, get_cached_ttml
+            from .ttml_parser import parse_ttml
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "apple_transcript",
+                        "episode": {"title": episode.title},
+                        "message": "Looking up episode in Apple Podcasts database...",
+                    }
+                )
+
+            apple_ep = find_episode_in_apple_db(
+                guid=episode.guid, title=episode.title, audio_url=episode.audio_url
+            )
+            if not apple_ep:
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "apple_transcript",
+                            "message": "Episode not found in Apple Podcasts database",
+                        }
+                    )
+                return None
+
+            transcript_id = apple_ep.get("transcript_id")
+            store_track_id = apple_ep.get("store_track_id")
+            if not transcript_id or not store_track_id:
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "apple_transcript",
+                            "message": "No transcript identifier in Apple Podcasts database",
+                        }
+                    )
+                return None
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "apple_transcript",
+                        "message": "Checking Apple Podcasts TTML cache...",
+                    }
+                )
+
+            ttml_content = get_cached_ttml(transcript_id, store_track_id)
+            if not ttml_content:
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "apple_transcript",
+                            "message": "TTML file not found in local cache",
+                        }
+                    )
+                return None
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "apple_transcript",
+                        "message": "Parsing Apple TTML transcript...",
+                    }
+                )
+
+            parsed = parse_ttml(ttml_content)
+            if not parsed:
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "apple_transcript",
+                            "message": "Failed to parse TTML transcript",
+                        }
+                    )
+                return None
+
+            text = parsed.get("text", "")
+            if not text or not text.strip() or len(text.strip()) < 50:
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "apple_transcript",
+                            "message": "Apple transcript too short or empty, skipping",
+                        }
+                    )
+                return None
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "apple_transcript",
+                        "message": f"Found Apple transcript ({len(text.split())} words)",
+                    }
+                )
+
+            return text
+
+        except Exception as e:
+            logging.warning("Apple transcript lookup failed: %s", e)
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "warning",
+                        "message": f"Apple transcript lookup failed: {e}",
+                    }
+                )
+            return None
+
     def _write_to_obsidian(self, episode: Episode):
         """Write episode transcript and summary to Obsidian vault if configured."""
         vault_path = self.config.vault_path
@@ -1219,11 +1335,25 @@ CHANGES MADE:
                                         "message": f"Failed to use external transcript, falling back to Whisper: {str(e)}",
                                     }
                                 )
-                            # Fall back to Whisper transcription
+                            # Fall back to Apple/Whisper transcription
                             episode.transcript_url = None
 
-                    # If no external transcript or it failed, use Whisper
-                    if not episode.transcript_url:
+                    # Try Apple Podcasts transcript if no external transcript
+                    if not episode.transcript:
+                        apple_text = self._get_apple_transcript(episode, progress_callback)
+                        if apple_text:
+                            episode.transcript = apple_text
+                            episode.transcript_source = "apple"
+                            if progress_callback:
+                                progress_callback(
+                                    {
+                                        "stage": "info",
+                                        "message": "Using Apple Podcasts transcript",
+                                    }
+                                )
+
+                    # If no external or Apple transcript, use Whisper
+                    if not episode.transcript:
                         if progress_callback:
                             progress_callback(
                                 {
@@ -1435,11 +1565,25 @@ CHANGES MADE:
                                 "message": f"Failed to use external transcript, falling back to local transcription: {str(e)}",
                             }
                         )
-                    # Fall back to Whisper transcription
+                    # Fall back to Apple/Whisper transcription
                     episode.transcript_url = None
 
-            # If no external transcript or it failed, use local transcription
-            if not episode.transcript_url:
+            # Try Apple Podcasts transcript if no external transcript
+            if not episode.transcript:
+                apple_text = self._get_apple_transcript(episode, progress_callback)
+                if apple_text:
+                    episode.transcript = apple_text
+                    episode.transcript_source = "apple"
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "info",
+                                "message": "Using Apple Podcasts transcript",
+                            }
+                        )
+
+            # If no external or Apple transcript, use local transcription
+            if not episode.transcript:
                 if progress_callback:
                     progress_callback(
                         {
