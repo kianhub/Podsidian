@@ -52,15 +52,17 @@ def _get_text_content(element: ET.Element) -> str:
     return "".join(element.itertext()).strip()
 
 
-def parse_ttml(xml_content: str) -> Optional[dict]:
+def parse_ttml(xml_content: str, include_speaker_labels: bool = True) -> Optional[dict]:
     """Parse Apple Podcasts TTML XML into structured transcript data.
 
     Args:
         xml_content: Raw XML string of TTML transcript.
+        include_speaker_labels: If True (default), prefix speaker changes with
+            "[Speaker N]: ". If False, output plain text without speaker labels.
 
     Returns:
         Dict with keys:
-        - "text": Full transcript as plain text with speaker labels like "[Speaker 1]: ..."
+        - "text": Full transcript as plain text (with or without speaker labels)
         - "segments": List of dicts with "speaker", "text", "start", "end"
         Returns None on any error or if transcript is empty.
     """
@@ -133,10 +135,12 @@ def parse_ttml(xml_content: str) -> Optional[dict]:
                         "start": begin if begin is not None else 0.0,
                         "end": end if end is not None else 0.0,
                     })
-                    if speaker_label != current_speaker:
+                    if include_speaker_labels and speaker_label != current_speaker:
                         current_speaker = speaker_label
                         text_parts.append(f"\n[{speaker_label}]: {text}")
                     else:
+                        if not include_speaker_labels and speaker_label != current_speaker:
+                            current_speaker = speaker_label
                         text_parts.append(f" {text}")
                 continue
 
@@ -170,10 +174,12 @@ def parse_ttml(xml_content: str) -> Optional[dict]:
                     "end": end if end is not None else 0.0,
                 })
 
-                if speaker_label != current_speaker:
+                if include_speaker_labels and speaker_label != current_speaker:
                     current_speaker = speaker_label
                     text_parts.append(f"\n[{speaker_label}]: {sentence_text}")
                 else:
+                    if not include_speaker_labels and speaker_label != current_speaker:
+                        current_speaker = speaker_label
                     text_parts.append(f" {sentence_text}")
 
         if not segments:

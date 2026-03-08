@@ -118,6 +118,11 @@ Transcript:
 {transcript}
 """,
     },
+    "apple_transcripts": {
+        "enabled": True,
+        "prefer_over_rss": False,
+        "include_speaker_labels": True,
+    },
     "briefing": {
         "categories": [
             "cybersecurity threats vulnerabilities hacking zero-day exploits",
@@ -299,6 +304,21 @@ class Config:
     def annoy_metric(self) -> str:
         """Get the configured distance metric for Annoy index."""
         return self.config["annoy"]["metric"]
+
+    @property
+    def apple_transcripts_enabled(self) -> bool:
+        """Whether to try Apple Podcasts transcripts before Whisper."""
+        return self.config.get("apple_transcripts", {}).get("enabled", True)
+
+    @property
+    def apple_transcripts_prefer_over_rss(self) -> bool:
+        """Whether to prefer Apple transcripts over RSS external transcripts."""
+        return self.config.get("apple_transcripts", {}).get("prefer_over_rss", False)
+
+    @property
+    def apple_transcripts_include_speaker_labels(self) -> bool:
+        """Whether to include [Speaker N]: prefixes in Apple transcript text."""
+        return self.config.get("apple_transcripts", {}).get("include_speaker_labels", True)
 
     @property
     def briefing_categories(self) -> List[str]:

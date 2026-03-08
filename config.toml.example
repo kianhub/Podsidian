@@ -27,6 +27,20 @@ template = """{title}
 {transcript}
 """
 
+[apple_transcripts]
+# Whether to try Apple Podcasts transcripts before falling back to Whisper
+# Apple transcripts are pre-made by Apple and available for many popular podcasts
+enabled = true
+
+# Whether to prefer Apple transcripts over RSS external transcripts
+# Set to true if you want Apple's higher-quality transcripts (with speaker labels)
+# even when the podcast RSS feed provides its own transcript
+prefer_over_rss = false
+
+# Whether to include [Speaker N]: prefixes in Apple transcript text
+# Apple transcripts include speaker diarization; set to false for plain text
+include_speaker_labels = true
+
 [search]
 # Search configuration options
 

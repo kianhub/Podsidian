@@ -903,8 +903,20 @@ CHANGES MADE:
 
         Returns the transcript text if found, or None if unavailable.
         Catches all exceptions to ensure Whisper fallback always works.
+        Respects apple_transcripts.enabled config flag.
         """
         import logging
+
+        # Skip Apple lookup entirely if disabled in config
+        if not self.config.apple_transcripts_enabled:
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "apple_transcript",
+                        "message": "Apple transcripts disabled in config",
+                    }
+                )
+            return None
 
         try:
             from .apple_podcasts import find_episode_in_apple_db, download_apple_ttml
@@ -971,7 +983,10 @@ CHANGES MADE:
                     }
                 )
 
-            parsed = parse_ttml(ttml_content)
+            parsed = parse_ttml(
+                ttml_content,
+                include_speaker_labels=self.config.apple_transcripts_include_speaker_labels,
+            )
             if not parsed:
                 if progress_callback:
                     progress_callback(
@@ -1301,8 +1316,29 @@ CHANGES MADE:
                     except requests.exceptions.RequestException as e:
                         raise Exception(f"Failed to download audio: {str(e)}")
 
-                    # Check if we have an external transcript URL
-                    if episode.transcript_url:
+                    # Determine transcript source priority based on config
+                    # Default: RSS external → Apple → Whisper
+                    # With prefer_over_rss: Apple → RSS external → Whisper
+                    prefer_apple = self.config.apple_transcripts_prefer_over_rss
+
+                    if prefer_apple:
+                        # Try Apple first
+                        apple_text = self._get_apple_transcript(
+                            episode, progress_callback
+                        )
+                        if apple_text:
+                            episode.transcript = apple_text
+                            episode.transcript_source = "apple"
+                            if progress_callback:
+                                progress_callback(
+                                    {
+                                        "stage": "info",
+                                        "message": "Using Apple Podcasts transcript (preferred over RSS)",
+                                    }
+                                )
+
+                    # Try RSS external transcript if not already resolved
+                    if not episode.transcript and episode.transcript_url:
                         if progress_callback:
                             progress_callback(
                                 {
@@ -1332,14 +1368,13 @@ CHANGES MADE:
                                 progress_callback(
                                     {
                                         "stage": "warning",
-                                        "message": f"Failed to use external transcript, falling back to Whisper: {str(e)}",
+                                        "message": f"Failed to use external transcript, falling back: {str(e)}",
                                     }
                                 )
-                            # Fall back to Apple/Whisper transcription
                             episode.transcript_url = None
 
-                    # Try Apple Podcasts transcript if no external transcript
-                    if not episode.transcript:
+                    # Try Apple Podcasts transcript if not yet resolved (default priority)
+                    if not episode.transcript and not prefer_apple:
                         apple_text = self._get_apple_transcript(episode, progress_callback)
                         if apple_text:
                             episode.transcript = apple_text
@@ -1532,8 +1567,25 @@ CHANGES MADE:
                     }
                 )
 
-            # Check if we have an external transcript URL
-            if episode.transcript_url:
+            # Determine transcript source priority based on config
+            prefer_apple = self.config.apple_transcripts_prefer_over_rss
+
+            if prefer_apple:
+                # Try Apple first when preferred over RSS
+                apple_text = self._get_apple_transcript(episode, progress_callback)
+                if apple_text:
+                    episode.transcript = apple_text
+                    episode.transcript_source = "apple"
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "info",
+                                "message": "Using Apple Podcasts transcript (preferred over RSS)",
+                            }
+                        )
+
+            # Try RSS external transcript if not already resolved
+            if not episode.transcript and episode.transcript_url:
                 if progress_callback:
                     progress_callback(
                         {
@@ -1562,14 +1614,13 @@ CHANGES MADE:
                         progress_callback(
                             {
                                 "stage": "warning",
-                                "message": f"Failed to use external transcript, falling back to local transcription: {str(e)}",
+                                "message": f"Failed to use external transcript, falling back: {str(e)}",
                             }
                         )
-                    # Fall back to Apple/Whisper transcription
                     episode.transcript_url = None
 
-            # Try Apple Podcasts transcript if no external transcript
-            if not episode.transcript:
+            # Try Apple Podcasts transcript if not yet resolved (default priority)
+            if not episode.transcript and not prefer_apple:
                 apple_text = self._get_apple_transcript(episode, progress_callback)
                 if apple_text:
                     episode.transcript = apple_text
