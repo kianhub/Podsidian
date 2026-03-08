@@ -1511,17 +1511,30 @@ CHANGES MADE:
                                 }
                             )
 
-    def reingest_episode(self, episode_id: int, progress_callback=None, debug: bool = False):
+    def reingest_episode(
+        self,
+        episode_id: int,
+        progress_callback=None,
+        debug: bool = False,
+        force_source: Optional[str] = None,
+    ):
         """Re-ingest a specific episode by ID, re-processing transcript and embeddings.
 
         Args:
             episode_id: Episode ID to re-ingest
             progress_callback: Optional callback for progress updates
             debug: Enable debug output
+            force_source: Force a specific transcript source ("apple", "whisper",
+                or "external"). If None, uses normal priority chain.
 
         Raises:
             Exception: If episode not found or processing fails
+            ValueError: If force_source is set but that source is unavailable
         """
+        if force_source and force_source not in ("apple", "whisper", "external"):
+            raise ValueError(
+                f"Invalid force_source '{force_source}'. Must be 'apple', 'whisper', or 'external'."
+            )
         # Retrieve episode
         episode = self.db.query(Episode).filter(Episode.id == episode_id).first()
         if not episode:
@@ -1567,99 +1580,158 @@ CHANGES MADE:
                     }
                 )
 
-            # Determine transcript source priority based on config
-            prefer_apple = self.config.apple_transcripts_prefer_over_rss
-
-            if prefer_apple:
-                # Try Apple first when preferred over RSS
+            # Resolve transcript based on force_source or normal priority chain
+            if force_source == "apple":
                 apple_text = self._get_apple_transcript(episode, progress_callback)
-                if apple_text:
-                    episode.transcript = apple_text
-                    episode.transcript_source = "apple"
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "stage": "info",
-                                "message": "Using Apple Podcasts transcript (preferred over RSS)",
-                            }
-                        )
-
-            # Try RSS external transcript if not already resolved
-            if not episode.transcript and episode.transcript_url:
-                if progress_callback:
-                    progress_callback(
-                        {
-                            "stage": "external_transcript",
-                            "episode": {"title": episode.title},
-                            "message": f"Using external transcript from {episode.transcript_url}",
-                        }
+                if not apple_text:
+                    raise ValueError(
+                        f"Apple transcript not available for episode #{episode_id} "
+                        f"'{episode.title}'. Check that the episode exists in Apple "
+                        f"Podcasts with a transcript ID."
                     )
-                try:
-                    start_time = time.time()
-                    episode.transcript = self._download_transcript(
-                        episode.transcript_url, progress_callback
-                    )
-                    episode.transcript_source = "external"
-                    transcript_time = time.time() - start_time
-
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "stage": "timing",
-                                "message": f"External transcript processing took {transcript_time:.2f} seconds",
-                            }
-                        )
-                except Exception as e:
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "stage": "warning",
-                                "message": f"Failed to use external transcript, falling back: {str(e)}",
-                            }
-                        )
-                    episode.transcript_url = None
-
-            # Try Apple Podcasts transcript if not yet resolved (default priority)
-            if not episode.transcript and not prefer_apple:
-                apple_text = self._get_apple_transcript(episode, progress_callback)
-                if apple_text:
-                    episode.transcript = apple_text
-                    episode.transcript_source = "apple"
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "stage": "info",
-                                "message": "Using Apple Podcasts transcript",
-                            }
-                        )
-
-            # If no external or Apple transcript, use local transcription
-            if not episode.transcript:
+                episode.transcript = apple_text
+                episode.transcript_source = "apple"
                 if progress_callback:
                     progress_callback(
                         {
                             "stage": "info",
-                            "message": "No external transcript found, falling back to local transcription",
+                            "message": "Using Apple Podcasts transcript (forced)",
                         }
                     )
+
+            elif force_source == "external":
+                if not episode.transcript_url:
+                    raise ValueError(
+                        f"No external transcript URL available for episode #{episode_id} "
+                        f"'{episode.title}'."
+                    )
+                start_time = time.time()
+                episode.transcript = self._download_transcript(
+                    episode.transcript_url, progress_callback
+                )
+                episode.transcript_source = "external"
+                transcript_time = time.time() - start_time
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "info",
+                            "message": f"Using external transcript (forced, took {transcript_time:.2f}s)",
+                        }
+                    )
+
+            elif force_source == "whisper":
+                if progress_callback:
                     progress_callback(
                         {"stage": "transcribing", "episode": {"title": episode.title}}
                     )
-
                 start_time = time.time()
                 episode.transcript = self._transcribe_audio(
                     temp_path, episode.title, progress_callback, debug=debug
                 )
                 episode.transcript_source = "whisper"
                 transcribe_time = time.time() - start_time
-
                 if progress_callback:
                     progress_callback(
                         {
-                            "stage": "timing",
-                            "message": f"Audio transcription took {transcribe_time:.2f} seconds",
+                            "stage": "info",
+                            "message": f"Using Whisper transcription (forced, took {transcribe_time:.2f}s)",
                         }
                     )
+
+            else:
+                # Normal priority chain: respect config for Apple vs RSS ordering
+                prefer_apple = self.config.apple_transcripts_prefer_over_rss
+
+                if prefer_apple:
+                    # Try Apple first when preferred over RSS
+                    apple_text = self._get_apple_transcript(episode, progress_callback)
+                    if apple_text:
+                        episode.transcript = apple_text
+                        episode.transcript_source = "apple"
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "stage": "info",
+                                    "message": "Using Apple Podcasts transcript (preferred over RSS)",
+                                }
+                            )
+
+                # Try RSS external transcript if not already resolved
+                if not episode.transcript and episode.transcript_url:
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "external_transcript",
+                                "episode": {"title": episode.title},
+                                "message": f"Using external transcript from {episode.transcript_url}",
+                            }
+                        )
+                    try:
+                        start_time = time.time()
+                        episode.transcript = self._download_transcript(
+                            episode.transcript_url, progress_callback
+                        )
+                        episode.transcript_source = "external"
+                        transcript_time = time.time() - start_time
+
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "stage": "timing",
+                                    "message": f"External transcript processing took {transcript_time:.2f} seconds",
+                                }
+                            )
+                    except Exception as e:
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "stage": "warning",
+                                    "message": f"Failed to use external transcript, falling back: {str(e)}",
+                                }
+                            )
+                        episode.transcript_url = None
+
+                # Try Apple Podcasts transcript if not yet resolved (default priority)
+                if not episode.transcript and not prefer_apple:
+                    apple_text = self._get_apple_transcript(episode, progress_callback)
+                    if apple_text:
+                        episode.transcript = apple_text
+                        episode.transcript_source = "apple"
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "stage": "info",
+                                    "message": "Using Apple Podcasts transcript",
+                                }
+                            )
+
+                # If no external or Apple transcript, use local transcription
+                if not episode.transcript:
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "info",
+                                "message": "No external transcript found, falling back to local transcription",
+                            }
+                        )
+                        progress_callback(
+                            {"stage": "transcribing", "episode": {"title": episode.title}}
+                        )
+
+                    start_time = time.time()
+                    episode.transcript = self._transcribe_audio(
+                        temp_path, episode.title, progress_callback, debug=debug
+                    )
+                    episode.transcript_source = "whisper"
+                    transcribe_time = time.time() - start_time
+
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "timing",
+                                "message": f"Audio transcription took {transcribe_time:.2f} seconds",
+                            }
+                        )
 
             # Generate embedding
             if progress_callback:

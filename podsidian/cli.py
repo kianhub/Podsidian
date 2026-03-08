@@ -1237,6 +1237,7 @@ def apple_transcripts(apply, debug):
                         else None
                     ),
                     debug=debug,
+                    force_source="apple",
                 )
                 success_count += 1
                 click.echo(f"  {click.style('✓', fg='green')} #{ep.id:04d} - {ep.title}")
