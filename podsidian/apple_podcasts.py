@@ -521,33 +521,37 @@ def download_apple_ttml(
     Returns:
         TTML file contents as a string, or None if unavailable.
     """
-    # Step 1: Always check local cache first (fast, no network)
-    cached = get_cached_ttml(transcript_id, store_track_id)
-    if cached:
-        return cached
+    try:
+        # Step 1: Always check local cache first (fast, no network)
+        cached = get_cached_ttml(transcript_id, store_track_id)
+        if cached:
+            return cached
 
-    # Step 2: Try CDN download (best-effort)
-    # Approach A: AMP API with bearer token (most reliable if token available)
-    token = _get_apple_bearer_token()
-    if token and store_track_id:
-        logger.debug("Attempting AMP API download for track %s", store_track_id)
-        content = _try_amp_api_download(store_track_id, token)
-        if content:
-            _cache_ttml(transcript_id, store_track_id, content)
-            return content
+        # Step 2: Try CDN download (best-effort)
+        # Approach A: AMP API with bearer token (most reliable if token available)
+        token = _get_apple_bearer_token()
+        if token and store_track_id:
+            logger.debug("Attempting AMP API download for track %s", store_track_id)
+            content = _try_amp_api_download(store_track_id, token)
+            if content:
+                _cache_ttml(transcript_id, store_track_id, content)
+                return content
 
-    # Approach B: Direct CDN URL patterns (no auth, rarely works)
-    if transcript_id:
-        logger.debug("Attempting direct CDN download for %s", transcript_id)
-        content = _try_direct_cdn_download(transcript_id)
-        if content:
-            _cache_ttml(transcript_id, store_track_id, content)
-            return content
+        # Approach B: Direct CDN URL patterns (no auth, rarely works)
+        if transcript_id:
+            logger.debug("Attempting direct CDN download for %s", transcript_id)
+            content = _try_direct_cdn_download(transcript_id)
+            if content:
+                _cache_ttml(transcript_id, store_track_id, content)
+                return content
 
-    # Approach C: Return None, fall back to Whisper
-    logger.debug(
-        "No TTML available for transcript_id=%s, store_track_id=%s",
-        transcript_id,
-        store_track_id,
-    )
-    return None
+        # Approach C: Return None, fall back to Whisper
+        logger.debug(
+            "No TTML available for transcript_id=%s, store_track_id=%s",
+            transcript_id,
+            store_track_id,
+        )
+        return None
+    except Exception as e:
+        logger.warning("Unexpected error in download_apple_ttml: %s", e)
+        return None
